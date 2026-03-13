@@ -15,10 +15,10 @@ https://github.com/user-attachments/assets/5b29cabb-eb95-44c9-8ffe-367c0758de8c
 ## 📦 Model Support Plan
 
 ### ✅ Supported
-- **Qwen3.5-4B** (Preview): https://huggingface.co/z-lab/Qwen3.5-4B-DFlash
-- **Qwen3.5-9B** (Preview): https://huggingface.co/z-lab/Qwen3.5-9B-DFlash
-- **Qwen3.5-35B-A3B** (Preview): https://huggingface.co/z-lab/Qwen3.5-35B-A3B-DFlash
-- **Qwen3-Coder-Next** (Preview): https://huggingface.co/z-lab/Qwen3-Coder-Next-DFlash
+- **Qwen3.5-4B**: https://huggingface.co/z-lab/Qwen3.5-4B-DFlash
+- **Qwen3.5-9B**: https://huggingface.co/z-lab/Qwen3.5-9B-DFlash
+- **Qwen3.5-35B-A3B**: https://huggingface.co/z-lab/Qwen3.5-35B-A3B-DFlash
+- **Qwen3-Coder-Next**: https://huggingface.co/z-lab/Qwen3-Coder-Next-DFlash
 - **gpt-oss-20b**: https://huggingface.co/z-lab/gpt-oss-20b-DFlash
 - **gpt-oss-120b**: https://huggingface.co/z-lab/gpt-oss-120b-DFlash
 - **Qwen3-4B**: https://huggingface.co/z-lab/Qwen3-4B-DFlash-b16  
@@ -73,7 +73,7 @@ python -m sglang.launch_server \
 ```
 
 ### Transformers
-
+Only support Qwen3 series models and LLaMA-3.1-8B.
 ```python
 from transformers import AutoModel, AutoModelForCausalLM, AutoTokenizer
 
@@ -95,7 +95,7 @@ prompt = "How many positive whole-number divisors does 196 have?"
 messages = [
     {"role": "user", "content": prompt}
 ]
-# Note: this draft model is used for thinking mode disabled
+# Note: Qwen3 DFlash draft model is used for thinking mode disabled
 text = tokenizer.apply_chat_template(
     messages,
     tokenize=False,
@@ -116,7 +116,7 @@ print(tokenizer.decode(generate_ids[0], skip_special_tokens=False))
 ```
 
 ## 📊 Evaluation
-We provide scripts to reproduce the speedup and acceptance length metrics in the paper. The reported results were tested on NVIDIA H200 or B200 GPUs. Please note that only Qwen3 series and LLaMA-3.1 models support Transformers backend benchmark. For other models please use SGLang to run the benchmarks.
+We provide scripts to reproduce the speedup and acceptance length metrics in the paper. The reported results were tested on NVIDIA H200 or B200 GPUs. Please note only Qwen3 series and LLaMA-3.1-8B models support Transformers backend benchmarks. For other models please use SGLang to run the benchmarks.
 
 To run benchmark on Transformers backend:
 ```bash
