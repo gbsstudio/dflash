@@ -1,27 +1,9 @@
-"""Unified benchmark for DFlash across Transformers, SGLang, and vLLM backends.
-
-Usage:
-    # Transformers (local inference):
-    torchrun --nproc_per_node=8 -m dflash.benchmark --backend transformers \
-        --model Qwen/Qwen3-4B --draft-model z-lab/Qwen3-4B-DFlash-b16 \
-        --dataset gsm8k --max-samples 128
-
-    # SGLang (against a running server):
-    python -m dflash.benchmark --backend sglang \
-        --base-url http://127.0.0.1:30000 --model Qwen/Qwen3.5-9B \
-        --dataset gsm8k --num-prompts 1024 --concurrency 32
-
-    # vLLM (against a running server):
-    python -m dflash.benchmark --backend vllm \
-        --base-url http://127.0.0.1:8000 --model Qwen/Qwen3.5-27B \
-        --dataset gsm8k --num-prompts 1024 --concurrency 32
-"""
-
 from __future__ import annotations
 
 import argparse
 import os
 import random
+import re
 import statistics
 import time
 import warnings
@@ -41,10 +23,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 
 from .model import DFlashDraftModel, sample, load_and_process_dataset, extract_context_feature
 
-
-# ---------------------------------------------------------------------------
-# Distributed helpers (transformers backend only)
-# ---------------------------------------------------------------------------
 
 def _dist_init() -> None:
     if "RANK" not in os.environ:
@@ -76,10 +54,6 @@ def _dist_gather(obj: Any, dst: int = 0) -> Optional[List[Any]]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Transformers backend
-# ---------------------------------------------------------------------------
-
 def _cuda_time() -> float:
     torch.cuda.synchronize()
     return time.perf_counter()
@@ -106,7 +80,6 @@ def _dflash_generate(
     past_key_values_target = DynamicCache()
     past_key_values_draft = DynamicCache()
 
-    # Prefill
     prefill_start = _cuda_time()
     output = target(
         input_ids,
@@ -122,7 +95,6 @@ def _dflash_generate(
         target_hidden = extract_context_feature(output.hidden_states, model.target_layer_ids)
     time_to_first_token = _cuda_time() - prefill_start
 
-    # Decode
     decode_start = _cuda_time()
     start = input_ids.shape[1]
     acceptance_lengths = []
@@ -193,7 +165,21 @@ def _dflash_generate(
     )
 
 
+_TRANSFORMERS_SUPPORTED_PATTERN = re.compile(r"qwen3(?!\.5)[\w-]*|llama.*3\.1.*8b.*instruct", re.IGNORECASE)
+
+
+def _check_transformers_model(model_name: str) -> None:
+    if not _TRANSFORMERS_SUPPORTED_PATTERN.search(model_name):
+        raise ValueError(
+            f"Transformers backend does not support '{model_name}'. "
+            f"Only Qwen3 series and LLaMA-3.1-8B-Instruct are supported. "
+            f"Use --backend sglang or --backend vllm for other models."
+        )
+
+
 def _run_transformers(args: argparse.Namespace) -> None:
+    _check_transformers_model(args.model)
+
     random.seed(0)
     np.random.seed(0)
     torch.manual_seed(0)
@@ -210,7 +196,11 @@ def _run_transformers(args: argparse.Namespace) -> None:
             import flash_attn
             return True
         except ImportError:
-            logger.warning("flash_attn not installed. Falling back to torch.sdpa. Speedup will be lower.")
+            logger.warning(
+                "flash_attn not installed. Falling back to torch.sdpa. Speedup will be lower. "
+                "For optimal speedup in Transformers backend, please install: "
+                "pip install flash-attn --no-build-isolation"
+            )
             return False
 
     installed_flash_attn = has_flash_attn()
@@ -277,10 +267,6 @@ def _run_transformers(args: argparse.Namespace) -> None:
     print(f"Acceptance length histogram: {[f'{x * 100:.1f}%' for x in histogram]}")
 
 
-# ---------------------------------------------------------------------------
-# Server backend (SGLang / vLLM) — HTTP client
-# ---------------------------------------------------------------------------
-
 def _send_sglang(
     base_url: str, text: str, *, max_new_tokens: int,
     temperature: float, top_p: float, top_k: int, timeout_s: int,
@@ -325,14 +311,12 @@ def _run_server(args: argparse.Namespace) -> None:
     dataset = load_and_process_dataset(args.dataset)
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
-    # Build prompts
-    num_prompts = args.num_prompts + args.concurrency  # extra for warmup
+    num_prompts = args.num_prompts + args.concurrency
     prompts: list[str] = []
     for i in range(num_prompts):
         item = dataset[i % len(dataset)]
         user_content = item["turns"][0]
         if is_vllm:
-            # vLLM gets raw text; chat template applied server-side
             prompts.append(user_content)
         else:
             prompts.append(tokenizer.apply_chat_template(
@@ -357,14 +341,12 @@ def _run_server(args: argparse.Namespace) -> None:
                 top_k=args.top_k, timeout_s=args.timeout_s,
             )
 
-    # Flush cache (sglang only)
     if not is_vllm:
         try:
             requests.get(args.base_url + "/flush_cache", timeout=60).raise_for_status()
         except Exception:
             print("Warning: /flush_cache failed. Continuing.")
 
-    # Warmup
     bs = max(args.concurrency, 1)
     if len(prompts) > bs:
         print(f"[warmup] {bs} requests ...")
@@ -372,7 +354,6 @@ def _run_server(args: argparse.Namespace) -> None:
             list(pool.map(send_one, prompts[:bs]))
         prompts = prompts[bs:]
 
-    # Benchmark
     print(f"Running benchmark: {args.num_prompts} prompts, concurrency={args.concurrency} ...")
     start = time.perf_counter()
     total_tokens = 0
@@ -381,7 +362,7 @@ def _run_server(args: argparse.Namespace) -> None:
 
     with ThreadPoolExecutor(max_workers=args.concurrency) as pool:
         futures = {pool.submit(send_one, p): i for i, p in enumerate(prompts)}
-        for fut in as_completed(futures):
+        for fut in tqdm(as_completed(futures), total=len(prompts), desc="Benchmarking"):
             out = fut.result()
             if is_vllm:
                 usage = out.get("usage", {})
@@ -414,27 +395,21 @@ def _run_server(args: argparse.Namespace) -> None:
     print(f"{'='*50}")
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="DFlash benchmark")
     parser.add_argument("--backend", choices=["transformers", "sglang", "vllm"], required=True)
-    parser.add_argument("--model", type=str, required=True, help="Target model name or path (also used for tokenizer).")
+    parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--dataset", type=str, required=True)
     parser.add_argument("--max-new-tokens", type=int, default=2048)
     parser.add_argument("--temperature", type=float, default=0.0)
 
-    # Transformers-specific
-    parser.add_argument("--draft-model", type=str, default=None, help="Draft model path (transformers only).")
+    parser.add_argument("--draft-model", type=str, default=None)
     parser.add_argument("--block-size", type=int, default=None)
     parser.add_argument("--max-samples", type=int, default=None)
 
-    # Server-specific (sglang / vllm)
     parser.add_argument("--base-url", type=str, default="http://127.0.0.1:30000")
     parser.add_argument("--num-prompts", type=int, default=1024)
-    parser.add_argument("--concurrency", type=int, default=32)
+    parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--top-p", type=float, default=1.0)
     parser.add_argument("--top-k", type=int, default=1)
     parser.add_argument("--enable-thinking", action="store_true")
