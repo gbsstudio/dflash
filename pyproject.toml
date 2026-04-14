@@ -29,6 +29,8 @@ sglang = [
 ]
 vllm = [
     "vllm",
+    "datasets>=3,<4",
+    "huggingface-hub<1",
 ]
 mlx = [
     "mlx",

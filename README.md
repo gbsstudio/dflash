@@ -100,7 +100,7 @@ print(tokenizer.decode(output[0], skip_special_tokens=False))
 
 ### MLX (Apple Silicon)
 
-Supports all models including the latest Qwen3.5.
+This MLX implementation has been tested on an Apple M5 Pro with Qwen3 and Qwen3.5 models.
 
 ```python
 from dflash.model_mlx import load, load_draft, stream_generate
